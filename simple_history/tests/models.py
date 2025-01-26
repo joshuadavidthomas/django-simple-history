@@ -9,7 +9,12 @@ from django.db.models.fields.related import ForeignKey
 from django.urls import reverse
 
 from simple_history import register
-from simple_history.models import HistoricalRecords, HistoricForeignKey
+from simple_history.manager import HistoricalQuerySet, HistoryManager
+from simple_history.models import (
+    HistoricalRecords,
+    HistoricForeignKey,
+    HistoricOneToOneField,
+)
 
 from .custom_user.models import CustomUser as User
 from .external.models import AbstractExternal, AbstractExternal2, AbstractExternal3
@@ -92,6 +97,22 @@ class PollWithAlternativeManager(models.Model):
     history = HistoricalRecords()
 
 
+class CustomPollManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().exclude(hidden=True)
+
+
+class PollWithCustomManager(models.Model):
+    some_objects = CustomPollManager()
+    all_objects = models.Manager()
+
+    question = models.CharField(max_length=200)
+    pub_date = models.DateTimeField("date published")
+    hidden = models.BooleanField(default=False)
+
+    history = HistoricalRecords()
+
+
 class IPAddressHistoricalModel(models.Model):
     ip_address = models.GenericIPAddressField()
 
@@ -109,6 +130,18 @@ class PollWithHistoricalIPAddress(models.Model):
         return reverse("poll-detail", kwargs={"pk": self.pk})
 
 
+class SessionsHistoricalModel(models.Model):
+    session = models.CharField(max_length=200, null=True, default=None)
+
+    class Meta:
+        abstract = True
+
+
+class PollWithHistoricalSessionAttr(models.Model):
+    question = models.CharField(max_length=200)
+    history = HistoricalRecords(bases=[SessionsHistoricalModel])
+
+
 class PollWithManyToMany(models.Model):
     question = models.CharField(max_length=200)
     pub_date = models.DateTimeField("date published")
@@ -124,6 +157,25 @@ class PollWithManyToManyCustomHistoryID(models.Model):
 
     history = HistoricalRecords(
         m2m_fields=[places], history_id_field=models.UUIDField(default=uuid.uuid4)
+    )
+
+
+class PollQuerySet(HistoricalQuerySet):
+    def questions(self):
+        return self.filter(question__startswith="Question ")
+
+
+class PollManager(HistoryManager):
+    def low_ids(self):
+        return self.filter(id__lte=3)
+
+
+class PollWithQuerySetCustomizations(models.Model):
+    question = models.CharField(max_length=200)
+    pub_date = models.DateTimeField("date published")
+
+    history = HistoricalRecords(
+        history_manager=PollManager, historical_queryset=PollQuerySet
     )
 
 
@@ -174,7 +226,7 @@ class PollParentWithManyToMany(models.Model):
 
 class PollChildBookWithManyToMany(PollParentWithManyToMany):
     books = models.ManyToManyField("Book", related_name="books_poll_child")
-    _history_m2m_fields = [books]
+    _history_m2m_fields = ["books"]
 
 
 class PollChildRestaurantWithManyToMany(PollParentWithManyToMany):
@@ -182,6 +234,11 @@ class PollChildRestaurantWithManyToMany(PollParentWithManyToMany):
         "Restaurant", related_name="restaurants_poll_child"
     )
     _history_m2m_fields = [restaurants]
+
+
+class PollWithSelfManyToMany(models.Model):
+    relations = models.ManyToManyField("self")
+    history = HistoricalRecords(m2m_fields=[relations])
 
 
 class CustomAttrNameForeignKey(models.ForeignKey):
@@ -533,6 +590,7 @@ class Planet(models.Model):
 
     class Meta:
         verbose_name = "Planet"
+        verbose_name_plural = "Planets"
 
 
 class Contact(models.Model):
@@ -653,7 +711,7 @@ class InheritTracking4(TrackedAbstractBaseA):
 
 class BasePlace(models.Model):
     name = models.CharField(max_length=50)
-    history = HistoricalRecords(inherit=True)
+    history = HistoricalRecords(inherit=True, table_name="base_places_history")
 
 
 class InheritedRestaurant(BasePlace):
@@ -927,5 +985,60 @@ class TestHistoricParticipanToHistoricOrganization(models.Model):
         TestOrganizationWithHistory,
         on_delete=CASCADE,
         related_name="historic_participants",
+    )
+    history = HistoricalRecords()
+
+
+class TestParticipantToHistoricOrganizationOneToOne(models.Model):
+    """
+    Non-historic table with one to one relationship to historic table.
+
+    In this case it should simply behave like ForeignKey because
+    the origin model (this one) cannot be historic, so foreign key
+    lookups are always "current".
+    """
+
+    name = models.CharField(max_length=15, unique=True)
+    organization = HistoricOneToOneField(
+        TestOrganizationWithHistory, on_delete=CASCADE, related_name="participant"
+    )
+
+
+class TestHistoricParticipantToOrganizationOneToOne(models.Model):
+    """
+    Historic table with one to one relationship to non-historic table.
+
+    In this case it should simply behave like OneToOneField because
+    the origin model (this one) cannot be historic, so one to one field
+    lookups are always "current".
+    """
+
+    name = models.CharField(max_length=15, unique=True)
+    organization = HistoricOneToOneField(
+        TestOrganization, on_delete=CASCADE, related_name="participant"
+    )
+    history = HistoricalRecords()
+
+
+class TestHistoricParticipanToHistoricOrganizationOneToOne(models.Model):
+    """
+    Historic table with one to one relationship to historic table.
+
+    In this case as_of queries on the origin model (this one)
+    or on the target model (the other one) will traverse the
+    one to one field relationship honoring the timepoint of the
+    original query. This only happens when both tables involved
+    are historic.
+
+    NOTE: related_name has to be different than the one used in
+          TestParticipantToHistoricOrganizationOneToOne as they are
+          sharing the same target table.
+    """
+
+    name = models.CharField(max_length=15, unique=True)
+    organization = HistoricOneToOneField(
+        TestOrganizationWithHistory,
+        on_delete=CASCADE,
+        related_name="historic_participant",
     )
     history = HistoricalRecords()
